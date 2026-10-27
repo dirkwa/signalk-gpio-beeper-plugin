@@ -33,8 +33,14 @@ function fakeApp() {
   return app;
 }
 
-function notify(app, path, value) {
-  app.onDelta({ updates: [{ values: [{ path, value }] }] });
+function notify(
+  app,
+  path,
+  value,
+  $source = "derived-data",
+  context = "vessels.self",
+) {
+  app.onDelta({ context, updates: [{ $source, values: [{ path, value }] }] });
 }
 
 const ALARM = {
@@ -92,6 +98,72 @@ describe("plugin", { skip }, () => {
     mock.timers.tick(3000);
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.deepEqual(fake.calls(), []);
+  });
+
+  it("stays quiet for a notification a rule silences", async () => {
+    plugin.start({
+      interval: 1000,
+      duration: 300,
+      rules: [
+        { path: "**", source: "maretron.*", action: "silent" },
+        { path: "electrical.**", action: "silent" },
+      ],
+    });
+    notify(app, "notifications.navigation.anchor", ALARM, "maretron.can0.17");
+    notify(app, "notifications.electrical.batteries.house", ALARM);
+    mock.timers.tick(3000);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(fake.calls(), []);
+  });
+
+  it("beeps for a notification a rule lets sound before a catch-all silences the rest", async () => {
+    plugin.start({
+      interval: 1000,
+      duration: 300,
+      rules: [
+        { path: "navigation.anchor", action: "sound" },
+        { path: "**", action: "silent" },
+      ],
+    });
+    notify(app, "notifications.electrical.batteries.house", ALARM);
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(fake.calls(), []);
+    notify(app, "notifications.navigation.anchor", ALARM);
+    mock.timers.tick(1000);
+    assert.deepEqual(await waitForCalls(fake, 1), [
+      "-z -c gpiochip0 -t 300,0 17=1",
+    ]);
+  });
+
+  it("keeps beeping for an alarm when a rule silences another source on the same path", async () => {
+    plugin.start({
+      interval: 1000,
+      duration: 300,
+      rules: [{ path: "**", source: "maretron.*", action: "silent" }],
+    });
+    notify(app, "notifications.navigation.anchor", ALARM);
+    notify(app, "notifications.navigation.anchor", ALARM, "maretron.can0.17");
+    mock.timers.tick(1000);
+    assert.deepEqual(await waitForCalls(fake, 1), [
+      "-z -c gpiochip0 -t 300,0 17=1",
+    ]);
+  });
+
+  it("keeps beeping when another vessel clears the same path", async () => {
+    plugin.start({ interval: 1000, duration: 300 });
+    notify(app, "notifications.navigation.anchor", ALARM);
+    notify(
+      app,
+      "notifications.navigation.anchor",
+      { ...ALARM, state: "normal" },
+      "ais",
+      "vessels.urn:mrn:imo:mmsi:123456789",
+    );
+    mock.timers.tick(1000);
+    assert.deepEqual(await waitForCalls(fake, 1), [
+      "-z -c gpiochip0 -t 300,0 17=1",
+    ]);
   });
 
   it("stops beeping once stopped", async () => {
